@@ -1,0 +1,1 @@
+# sigma-dropdown-auto-selector
