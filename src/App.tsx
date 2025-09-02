@@ -16,34 +16,24 @@ const App: React.FC = () => {
     triggerOnLoad: true,
     retryAttempts: '3'
   });
-  const [status, setStatus] = useState<string>('Ready for configuration...');
+  const [status, setStatus] = useState<string>('Plugin loaded successfully');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [lastAttempt, setLastAttempt] = useState<string>('');
   const [pluginClient, setPluginClient] = useState<any>(null);
 
   useEffect(() => {
-    // Try to initialize the Sigma plugin when available
-    const initializePlugin = async () => {
+    // Initialize plugin when window.sigma is available
+    const initializePlugin = () => {
       try {
-        // Use dynamic import with any type to avoid TypeScript issues
-        const sigmaPlugin: any = await import('@sigmacomputing/plugin');
-        
-        // Try different ways to find the initialize function
-        let initialize: any = null;
-        
-        if (sigmaPlugin) {
-          initialize = sigmaPlugin.initialize ||
-                      sigmaPlugin.default?.initialize ||
-                      sigmaPlugin.Client?.initialize ||
-                      (window as any).sigmaPlugin?.initialize;
-        }
-
-        if (initialize && typeof initialize === 'function') {
-          const client = initialize();
-          setPluginClient(client);
+        // Check if we're in Sigma environment
+        if ((window as any).sigma || (window as any).sigmaPlugin) {
+          const sigma = (window as any).sigma || (window as any).sigmaPlugin;
           
-          // Configure the editor panel
-          if (client && client.config && typeof client.config.configureEditorPanel === 'function') {
+          if (sigma && sigma.initialize) {
+            const client = sigma.initialize();
+            setPluginClient(client);
+            
+            // Configure editor panel
             client.config.configureEditorPanel([
               {
                 name: 'targetControl',
@@ -63,11 +53,6 @@ const App: React.FC = () => {
                 defaultValue: '3'
               },
               {
-                name: 'autoTrigger',
-                type: 'toggle', 
-                defaultValue: true
-              },
-              {
                 name: 'instructions',
                 type: 'text',
                 multiline: true,
@@ -77,50 +62,58 @@ const App: React.FC = () => {
             ]);
 
             // Subscribe to config changes
-            if (typeof client.config.subscribe === 'function') {
-              client.config.subscribe((newConfig: Partial<PluginConfig>) => {
-                setConfig(newConfig);
-                if (newConfig.targetControl) {
-                  setStatus(`Configured to monitor: ${newConfig.targetControl}`);
-                }
-              });
-            }
-          }
+            client.config.subscribe((newConfig: Partial<PluginConfig>) => {
+              setConfig(newConfig);
+              if (newConfig.targetControl) {
+                setStatus(`Configured to monitor: ${newConfig.targetControl}`);
+              }
+            });
 
-          setStatus('Plugin initialized successfully');
-        } else {
-          throw new Error('Initialize function not found');
+            setStatus('Connected to Sigma - ready for configuration');
+            return;
+          }
         }
+        
+        // Fallback for demo mode
+        setStatus('Demo mode - configure settings below');
       } catch (error) {
-        console.log('Sigma plugin not available, running in demo mode:', error);
-        setStatus('Running in demo mode - configure settings below');
+        console.log('Plugin initialization:', error);
+        setStatus('Demo mode - configure settings below');
       }
     };
 
+    // Try multiple times as Sigma might load async
     initializePlugin();
-  }, []);
+    const interval = setInterval(() => {
+      if (!pluginClient) {
+        initializePlugin();
+      } else {
+        clearInterval(interval);
+      }
+    }, 1000);
 
-  // Handle manual config updates when not connected to Sigma
+    // Clean up after 10 seconds
+    setTimeout(() => clearInterval(interval), 10000);
+    
+    return () => clearInterval(interval);
+  }, [pluginClient]);
+
   const updateConfig = (key: keyof PluginConfig, value: any) => {
-    if (pluginClient && pluginClient.config && typeof pluginClient.config.setKey === 'function') {
+    if (pluginClient && pluginClient.config) {
       pluginClient.config.setKey(key, value);
     } else {
       setConfig(prev => ({ ...prev, [key]: value }));
     }
   };
 
-  const generateControlScript = (): string => {
+  const createScript = (): string => {
     if (!config?.targetControl) return '';
     
     const retryAttempts = parseInt(config.retryAttempts || '3', 10);
     
-    return `// Sigma Dropdown Auto-Selector Script
-// Target Control: ${config.targetControl}
-// Generated: ${new Date().toISOString()}
-
-(function() {
+    return `(function() {
   var CONFIG = {
-    targetControlId: '${config.targetControl}',
+    targetControlId: "${config.targetControl}",
     maxRetries: ${retryAttempts},
     retryDelay: 500,
     observerTimeout: 30000
@@ -129,154 +122,103 @@ const App: React.FC = () => {
   var attempts = 0;
   
   function log(message) {
-    console.log('[Sigma Auto-Selector]', message);
+    console.log("[Sigma Auto-Selector]", message);
   }
   
   function selectFirstOption() {
     attempts++;
-    log('Attempt ' + attempts + ' to find and select dropdown option');
+    log("Attempt " + attempts + " to find and select dropdown option");
     
-    // Strategy 1: Look for control by data attribute
     var dropdown = document.querySelector('[data-control-id="' + CONFIG.targetControlId + '"]');
     
     if (!dropdown) {
-      // Strategy 2: Look for control by aria-label or title
       dropdown = document.querySelector('[aria-label*="' + CONFIG.targetControlId + '"], [title*="' + CONFIG.targetControlId + '"]');
     }
     
     if (!dropdown) {
-      // Strategy 3: Look for any dropdown in proximity
       var allDropdowns = Array.from(document.querySelectorAll('select, [role="combobox"], [role="listbox"], [class*="dropdown"], [class*="select"]'));
       
-      dropdown = allDropdowns.find(function(el) {
+      for (var i = 0; i < allDropdowns.length; i++) {
+        var el = allDropdowns[i];
         var parent = el.closest('[data-testid], [class*="control"], [class*="filter"]');
-        return parent && (parent.textContent || '').includes(CONFIG.targetControlId);
-      });
+        if (parent && parent.textContent && parent.textContent.indexOf(CONFIG.targetControlId) >= 0) {
+          dropdown = el;
+          break;
+        }
+      }
     }
     
     if (dropdown) {
-      log('Found dropdown element:', dropdown);
+      log("Found dropdown element");
       
-      if (dropdown.tagName === 'SELECT') {
-        return handleSelectDropdown(dropdown);
+      if (dropdown.tagName === "SELECT") {
+        if (dropdown.options && dropdown.options.length > 0) {
+          var startIndex = (dropdown.options[0].value === "" || dropdown.options[0].textContent.trim() === "") ? 1 : 0;
+          
+          if (dropdown.options.length > startIndex) {
+            dropdown.selectedIndex = startIndex;
+            dropdown.dispatchEvent(new Event("change", { bubbles: true }));
+            dropdown.dispatchEvent(new Event("input", { bubbles: true }));
+            log('Selected option: "' + dropdown.options[startIndex].textContent + '"');
+            return true;
+          }
+        }
       } else {
-        return handleCustomDropdown(dropdown);
-      }
-    } else {
-      log('Dropdown not found');
-      return false;
-    }
-  }
-  
-  function handleSelectDropdown(select) {
-    if (select.options && select.options.length > 0) {
-      var startIndex = (select.options[0].value === '' || select.options[0].textContent.trim() === '') ? 1 : 0;
-      
-      if (select.options.length > startIndex) {
-        select.selectedIndex = startIndex;
-        select.dispatchEvent(new Event('change', { bubbles: true }));
-        select.dispatchEvent(new Event('input', { bubbles: true }));
-        log('Selected option: "' + select.options[startIndex].textContent + '"');
+        dropdown.click();
+        
+        setTimeout(function() {
+          var options = document.querySelectorAll('[role="option"], [data-value], .dropdown-item, .select-option, [class*="option"]');
+          
+          if (options.length > 0) {
+            var visibleOptions = [];
+            for (var j = 0; j < options.length; j++) {
+              var option = options[j];
+              var rect = option.getBoundingClientRect();
+              if (rect.width > 0 && rect.height > 0) {
+                visibleOptions.push(option);
+              }
+            }
+            
+            if (visibleOptions.length > 0) {
+              var firstOption = visibleOptions[0];
+              firstOption.click();
+              log('Selected option: "' + (firstOption.textContent || "").trim() + '"');
+              return true;
+            }
+          }
+          
+          log("No visible options found after opening dropdown");
+          return false;
+        }, 200);
+        
         return true;
       }
-    }
-    return false;
-  }
-  
-  function handleCustomDropdown(dropdown) {
-    dropdown.click();
-    
-    setTimeout(function() {
-      var options = document.querySelectorAll('[role="option"], [data-value], .dropdown-item, .select-option, [class*="option"]');
-      
-      if (options.length > 0) {
-        var visibleOptions = Array.from(options).filter(function(option) {
-          var rect = option.getBoundingClientRect();
-          return rect.width > 0 && rect.height > 0;
-        });
-        
-        if (visibleOptions.length > 0) {
-          var firstOption = visibleOptions[0];
-          firstOption.click();
-          log('Selected option: "' + (firstOption.textContent || '').trim() + '"');
-          return true;
-        }
-      }
-      
-      log('No visible options found after opening dropdown');
+    } else {
+      log("Dropdown not found");
       return false;
-    }, 200);
-    
-    return true;
+    }
   }
   
   function trySelectWithRetry() {
     if (selectFirstOption()) {
-      log('Selection completed successfully');
+      log("Selection completed successfully");
       return;
     }
     
     if (attempts < CONFIG.maxRetries) {
-      log('Retrying in ' + CONFIG.retryDelay + 'ms... (attempt ' + (attempts + 1) + '/' + CONFIG.maxRetries + ')');
+      log("Retrying in " + CONFIG.retryDelay + "ms... (attempt " + (attempts + 1) + "/" + CONFIG.maxRetries + ")");
       setTimeout(trySelectWithRetry, CONFIG.retryDelay);
     } else {
-      log('Max retry attempts reached. Setting up DOM observer...');
-      setupDOMObserver();
+      log("Max retry attempts reached");
     }
   }
   
-  function setupDOMObserver() {
-    var observer = new MutationObserver(function(mutations) {
-      for (var i = 0; i < mutations.length; i++) {
-        var mutation = mutations[i];
-        if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
-          if (selectFirstOption()) {
-            observer.disconnect();
-            log('Selection completed via DOM observer');
-            return;
-          }
-        }
-      }
-    });
-    
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true
-    });
-    
-    setTimeout(function() {
-      observer.disconnect();
-      log('DOM observer timeout reached');
-    }, CONFIG.observerTimeout);
-  }
-  
-  log('Starting auto-selection process...');
+  log("Starting auto-selection process...");
   trySelectWithRetry();
 })();`;
   };
 
-  const copyScript = (): void => {
-    const script = generateControlScript();
-    if (navigator.clipboard) {
-      navigator.clipboard.writeText(script).then(() => {
-        setStatus('Script copied to clipboard!');
-        setTimeout(() => {
-          setStatus(`Ready - monitoring: ${config?.targetControl || 'demo'}`);
-        }, 2000);
-      });
-    } else {
-      // Fallback for browsers without clipboard API
-      const textArea = document.createElement('textarea');
-      textArea.value = script;
-      document.body.appendChild(textArea);
-      textArea.select();
-      document.execCommand('copy');
-      document.body.removeChild(textArea);
-      setStatus('Script copied to clipboard!');
-    }
-  };
-
-  const triggerAutoSelection = (): void => {
+  const executeSelection = () => {
     if (!config?.targetControl) {
       setStatus('Please enter a target control ID first');
       return;
@@ -287,14 +229,12 @@ const App: React.FC = () => {
     setLastAttempt(new Date().toLocaleTimeString());
     
     try {
-      const script = generateControlScript();
-      const scriptElement = document.createElement('script');
-      scriptElement.textContent = script;
-      document.head.appendChild(scriptElement);
-      document.head.removeChild(scriptElement);
+      // Use eval instead of script injection to avoid CSP issues
+      const script = createScript();
+      eval(script);
       
       setTimeout(() => {
-        setStatus('Auto-selection script executed');
+        setStatus('Auto-selection executed');
         setIsLoading(false);
       }, 1000);
     } catch (error) {
@@ -303,187 +243,132 @@ const App: React.FC = () => {
     }
   };
 
+  const copyToClipboard = () => {
+    const script = createScript();
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(script).then(() => {
+        setStatus('Script copied to clipboard!');
+        setTimeout(() => {
+          setStatus('Ready');
+        }, 2000);
+      });
+    } else {
+      setStatus('Clipboard not available - script generated in console');
+      console.log('Auto-selection script:', script);
+    }
+  };
+
   return (
     <div style={{
-      padding: '20px',
-      fontFamily: '"Segoe UI", Tahoma, Geneva, Verdana, sans-serif',
-      maxWidth: '450px',
+      padding: '16px',
+      fontFamily: 'system-ui, -apple-system, sans-serif',
+      maxWidth: '400px',
       backgroundColor: '#ffffff',
       borderRadius: '8px',
-      boxShadow: '0 2px 10px rgba(0,0,0,0.1)',
-      border: '1px solid #e1e5e9',
-      margin: '0 auto'
+      border: '1px solid #e1e5e9'
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', marginBottom: '16px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', marginBottom: '12px' }}>
         <div style={{
-          width: '8px',
-          height: '8px',
+          width: '6px',
+          height: '6px',
           borderRadius: '50%',
           backgroundColor: config?.targetControl ? '#28a745' : '#ffc107',
-          marginRight: '12px'
+          marginRight: '8px'
         }} />
-        <h3 style={{ margin: 0, color: '#343a40', fontSize: '18px' }}>
+        <h3 style={{ margin: 0, color: '#343a40', fontSize: '16px' }}>
           Dropdown Auto-Selector
         </h3>
       </div>
       
       <div style={{
-        padding: '12px',
+        padding: '8px',
         backgroundColor: '#f8f9fa',
         borderLeft: '3px solid #007bff',
-        marginBottom: '16px',
-        fontSize: '14px',
-        lineHeight: '1.4',
+        marginBottom: '12px',
+        fontSize: '12px',
         color: '#6c757d'
       }}>
-        {config?.instructions || 'This plugin monitors a dropdown control and automatically selects the first available option when the workbook loads or when triggered.'}
+        {config?.instructions || 'Automatically selects the first available dropdown option.'}
       </div>
       
       {!pluginClient && (
-        <div style={{ marginBottom: '16px' }}>
-          <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold', color: '#495057' }}>
+        <div style={{ marginBottom: '12px' }}>
+          <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '12px' }}>
             Target Control ID:
           </label>
           <input
             type="text"
-            placeholder="Enter control ID (e.g., dropdown-1)"
+            placeholder="Enter control ID"
             value={config?.targetControl || ''}
             onChange={(e) => updateConfig('targetControl', e.target.value)}
             style={{
               width: '100%',
-              padding: '10px',
+              padding: '6px',
               borderRadius: '4px',
               border: '1px solid #ced4da',
-              fontSize: '14px',
+              fontSize: '12px',
               boxSizing: 'border-box'
             }}
           />
-          <small style={{ color: '#6c757d', fontSize: '12px' }}>
-            Find this in your Sigma workbook by inspecting the dropdown control element
-          </small>
         </div>
       )}
       
-      <div style={{ marginBottom: '12px' }}>
-        <strong style={{ color: '#495057' }}>Target Control:</strong>
-        <div style={{ 
-          marginTop: '4px',
-          padding: '8px',
-          backgroundColor: '#f8f9fa',
-          borderRadius: '4px',
-          fontFamily: 'monospace',
-          fontSize: '13px',
-          color: config?.targetControl ? '#28a745' : '#6c757d',
-          wordBreak: 'break-all'
-        }}>
-          {config?.targetControl || 'Not configured'}
-        </div>
-      </div>
-      
-      <div style={{ marginBottom: '16px' }}>
-        <strong style={{ color: '#495057' }}>Status:</strong>
+      <div style={{ marginBottom: '8px' }}>
+        <strong style={{ color: '#495057', fontSize: '12px' }}>Status:</strong>
         <div style={{
-          marginTop: '4px',
-          padding: '8px',
+          marginTop: '2px',
+          padding: '6px',
           backgroundColor: isLoading ? '#fff3cd' : '#d4edda',
           border: '1px solid ' + (isLoading ? '#ffeaa7' : '#c3e6cb'),
           borderRadius: '4px',
           color: isLoading ? '#856404' : '#155724',
-          fontSize: '14px'
+          fontSize: '11px'
         }}>
           {status}
         </div>
       </div>
       
       {lastAttempt && (
-        <div style={{ marginBottom: '16px', fontSize: '12px', color: '#6c757d' }}>
+        <div style={{ marginBottom: '8px', fontSize: '10px', color: '#6c757d' }}>
           Last attempt: {lastAttempt}
         </div>
       )}
       
-      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '16px' }}>
+      <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
         <button
-          onClick={triggerAutoSelection}
+          onClick={executeSelection}
           disabled={isLoading || !config?.targetControl}
           style={{
-            padding: '10px 16px',
+            padding: '6px 12px',
             backgroundColor: (isLoading || !config?.targetControl) ? '#6c757d' : '#007bff',
             color: 'white',
             border: 'none',
-            borderRadius: '5px',
+            borderRadius: '4px',
             cursor: (isLoading || !config?.targetControl) ? 'not-allowed' : 'pointer',
-            fontSize: '14px',
-            fontWeight: '500',
-            transition: 'background-color 0.2s',
-            flex: '1',
-            minWidth: '120px'
+            fontSize: '11px',
+            fontWeight: '500'
           }}
         >
-          {isLoading ? 'Processing...' : 'Execute Selection'}
+          {isLoading ? 'Processing...' : 'Execute'}
         </button>
         
         <button
-          onClick={copyScript}
+          onClick={copyToClipboard}
           disabled={!config?.targetControl}
           style={{
-            padding: '10px 16px',
+            padding: '6px 12px',
             backgroundColor: !config?.targetControl ? '#6c757d' : '#28a745',
             color: 'white',
             border: 'none',
-            borderRadius: '5px',
+            borderRadius: '4px',
             cursor: !config?.targetControl ? 'not-allowed' : 'pointer',
-            fontSize: '14px',
-            fontWeight: '500',
-            transition: 'background-color 0.2s',
-            flex: '1',
-            minWidth: '100px'
+            fontSize: '11px',
+            fontWeight: '500'
           }}
         >
           Copy Script
         </button>
       </div>
-      
-      {!pluginClient && (
-        <div style={{
-          padding: '16px',
-          backgroundColor: '#e7f3ff',
-          border: '1px solid #b6d7ff',
-          borderRadius: '6px',
-          fontSize: '14px',
-          color: '#004085',
-          marginBottom: '16px'
-        }}>
-          <strong>Demo Mode:</strong><br/>
-          This plugin is running in demo mode. When deployed in Sigma, configuration will be handled through the plugin settings panel.
-        </div>
-      )}
-      
-      <details style={{ marginTop: '16px' }}>
-        <summary style={{ 
-          cursor: 'pointer', 
-          padding: '8px 0',
-          borderTop: '1px solid #e9ecef',
-          fontSize: '14px',
-          fontWeight: '500',
-          color: '#6c757d'
-        }}>
-          Usage Instructions
-        </summary>
-        <div style={{
-          padding: '12px 0',
-          fontSize: '13px',
-          lineHeight: '1.5',
-          color: '#6c757d'
-        }}>
-          <ol style={{ paddingLeft: '20px', margin: 0 }}>
-            <li><strong>Find Control ID:</strong> In Sigma, inspect your dropdown control element to find its ID</li>
-            <li><strong>Configure:</strong> Enter the control ID in the field above (demo mode) or plugin settings (when deployed)</li>
-            <li><strong>Test:</strong> Click "Execute Selection" to test the auto-selection manually</li>
-            <li><strong>Deploy:</strong> Use "Copy Script" to get standalone JavaScript for other implementations</li>
-            <li><strong>Auto-trigger:</strong> When deployed in Sigma, enable "Trigger on Load" in settings for automatic selection</li>
-          </ol>
-        </div>
-      </details>
     </div>
   );
 };
